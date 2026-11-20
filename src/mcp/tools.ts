@@ -388,7 +388,8 @@ export function registerTools(server: McpServer, context: ToolContext): void {
         if (items.length === 0) {
           return text(`终端 ${terminal_number}（${found.address}）还没有已记录的 /rename 历史。`);
         }
-        const shown = items.slice(0, MAX_HISTORY_LISTED);
+        // Items are oldest-first; cap to the tail so the NEWEST entries survive.
+        const shown = items.slice(-MAX_HISTORY_LISTED);
         const lines = shown.map((item) => {
           const when = new Date(item.ts).toLocaleString("sv-SE", { hour12: false });
           const state = item.report ? "report" : item.prompt ? "prompt-only" : "title-only";

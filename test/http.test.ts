@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -56,6 +56,14 @@ async function freePort(): Promise<number> {
 
 test("OAuth 2.1 + Streamable HTTP serves tools end to end", async () => {
   const stateDir = mkdtempSync(join(tmpdir(), "herdr-mcp-http-"));
+  // read_terminal writes an ack marker under $HOME; point HOME at a temp copy
+  // so the test never forges a read in the real app data. Capture the real
+  // home's marker stat first so we can prove it was not touched.
+  const fakeHome = mkdtempSync(join(tmpdir(), "herdr-mcp-home-"));
+  const realHome = process.env.HOME;
+  const realAck = realHome ? join(realHome, ".config", "herdr-app", "data", "ack") : null;
+  const realAckBefore = realAck ? statSync(realAck) : null;
+  process.env.HOME = fakeHome;
   const core = await startFakeCore({
     "terminal.list": () => ({ result: { terminals: [terminalFixture()], hidden_finished: 0, machines: [{ name: "build-box", state: "connected" }] } }),
     "terminal.get": () => ({ result: terminalFixture() }),
@@ -255,6 +263,13 @@ test("OAuth 2.1 + Streamable HTTP serves tools end to end", async () => {
     });
     const readBody = (await read.json()) as { result: { content: { text: string }[] } };
     assert.match(readBody.result.content[0]!.text, /All tests pass/);
+    // The ack marker must land in the temp home, never the real one.
+    const tempAck = join(fakeHome, ".config", "herdr-app", "data", "ack", "t7.json");
+    assert.match(readFileSync(tempAck, "utf8"), /"tool":"read_terminal"/);
+    if (realAck && realAckBefore) {
+      const after = statSync(realAck);
+      assert.equal(after.mtimeMs, realAckBefore.mtimeMs, "real data/ack must not be touched");
+    }
 
     const send = await fetch(`${base}/mcp`, {
       method: "POST",
@@ -268,10 +283,12 @@ test("OAuth 2.1 + Streamable HTTP serves tools end to end", async () => {
     assert.match(auditText, /send_message/);
     assert.match(auditText, /please continue/);
   } finally {
+    process.env.HOME = realHome;
     await running.close();
     link.close();
     await core.close();
     rmSync(stateDir, { recursive: true, force: true });
+    rmSync(fakeHome, { recursive: true, force: true });
   }
 });
 

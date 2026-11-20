@@ -2,7 +2,9 @@
 // three writing tools are audited and never bypass a blocked terminal.
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { readFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+
 import { z } from "zod";
 
 import type { AuditLog } from "../audit.js";
@@ -120,7 +122,10 @@ function formatTerminalDetail(terminal: Terminal): string {
 // ---- rename-history (voice queries over the terminal-numbers labels) ----
 
 const HISTORY_DIR = () => `${process.env.HOME ?? ""}/.config/herdr-app/data/rename-history`;
-const NUMBERS_JSON = () => `${process.env.HOME ?? ""}/.config/herdr-app/mods/terminal-numbers/numbers.json`;
+// done-blink is the live terminal-numbers mod folder; while layouts still point
+// at the old folder the numbers map is read from either.
+const NUMBERS_JSON_PRIMARY = () => `${process.env.HOME ?? ""}/.config/herdr-app/mods/done-blink/numbers.json`;
+const NUMBERS_JSON_FALLBACK = () => `${process.env.HOME ?? ""}/.config/herdr-app/mods/terminal-numbers/numbers.json`;
 const MAX_HISTORY_LISTED = 60;
 const MAX_HISTORY_CHARS = 8_000;
 
@@ -159,7 +164,7 @@ function readJsonFile(path: string): Record<string, unknown> | null {
 }
 
 function addressForNumber(terminalNumber: number): { address: string; title?: string } | null {
-  const doc = readJsonFile(NUMBERS_JSON());
+  const doc = readJsonFile(NUMBERS_JSON_PRIMARY()) ?? readJsonFile(NUMBERS_JSON_FALLBACK());
   const numbers = (doc?.numbers ?? {}) as Record<string, string>;
   const address = numbers[String(terminalNumber)];
   if (!address) return null;
@@ -171,6 +176,38 @@ function historyFor(address: string): HistoryItem[] {
   const doc = readJsonFile(`${HISTORY_DIR()}/${encodeURIComponent(address)}.json`);
   const items = (doc?.items ?? []) as HistoryItem[];
   return Array.isArray(items) ? items.filter((it) => it && typeof it.num === "number" && typeof it.title === "string") : [];
+}
+
+// The done-blink mod clears a terminal's blink only after Bori has actually
+// looked at its screen, so every read_terminal leaves a marker file the mod's
+// watcher can see: data/ack/<encodeURIComponent(address)>.json. The address
+// must be the canonical one from the getTerminal result, never the raw
+// argument (which may be a name or machine/t7).
+const APP_DATA_DIR = () => `${process.env.HOME ?? ""}/.config/herdr-app/data`;
+
+// Atomic like the oauth store (temp file + rename) so the mod never parses a
+// half-written marker. Best-effort: a failed write must never change the
+// tool's own result. Exported for tests.
+export function writeAckMarker(
+  address: string,
+  dataDir: string = APP_DATA_DIR(),
+  now: number = Date.now(),
+): void {
+  try {
+    const dir = join(dataDir, "ack");
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const path = join(dir, `${encodeURIComponent(address)}.json`);
+    const temporary = `${path}.${process.pid}.tmp`;
+    writeFileSync(
+      temporary,
+      `${JSON.stringify({ v: 1, address, ts: now, by: "bori", tool: "read_terminal" })}\n`,
+      { mode: 0o600 },
+    );
+    chmodSync(temporary, 0o600);
+    renameSync(temporary, path);
+  } catch {
+    // The marker is advisory; swallowing keeps read_terminal's result identical.
+  }
 }
 
 function formatWait(result: WaitResult): string {
@@ -311,6 +348,7 @@ export function registerTools(server: McpServer, context: ToolContext): void {
           client.getTerminal(terminal),
           client.readTerminal(terminal, lines ?? 40),
         ]);
+        writeAckMarker(terminalFacts.address);
         const header =
           `# ${terminalFacts.address}  ${agentName(terminalFacts)}  ${statusWord(terminalFacts)}  turn=${terminalFacts.turn}\n` +
           `# complete=${read.complete} how=${read.how}${read.why ? ` why=${read.why}` : ""}\n`;

@@ -94,10 +94,17 @@ test("writeAckMarker swallows an unwritable ack dir", () => {
   try {
     writeAckMarker("t3f", root, 1);
     chmodSync(ack, 0o000);
-    assert.doesNotThrow(() => writeAckMarker("t9", root, 2));
-    assert.ok(!existsSync(join(ack, "t9.json")), "nothing was written");
+    // existsSync here would be dead: stat cannot enter a 000-mode dir, so it is
+    // always false. Prove the write failed instead, after restoring access.
+    try {
+      assert.doesNotThrow(() => writeAckMarker("t9", root, 2));
+    } finally {
+      chmodSync(ack, ACK_DIR_PERMISSIONS);
+    }
+    const marker = JSON.parse(readFileSync(join(ack, "t3f.json"), "utf8")) as { ts: number };
+    assert.equal(marker.ts, 1, "the swallowed write did not touch the existing marker");
+    assert.deepEqual(readdirSync(ack).filter((name) => name.endsWith(".tmp")), [], "no temp file is left behind");
   } finally {
-    chmodSync(ack, ACK_DIR_PERMISSIONS);
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -134,12 +141,23 @@ test("read_terminal acks the canonical address and is unchanged when the ack wri
       assert.ok(!existsSync(join(home, ".config/herdr-app/data/ack/demo.json")), "not the raw argument");
 
       const ackDir = join(home, ".config/herdr-app/data/ack");
+      const markerPath = join(ackDir, "t3f.json");
+      const tsBefore = (JSON.parse(readFileSync(markerPath, "utf8")) as { ts: number }).ts;
       chmodSync(ackDir, 0o000);
-      const unwritable = await call();
+      let unwritable: { isError?: boolean; content: { type: string; text: string }[] };
+      try {
+        unwritable = await call();
+      } finally {
+        // Restore before asserting: existsSync inside a 000-mode dir is always
+        // false (stat cannot enter), and a failing test must not leave the dir
+        // unreadable for cleanup below.
+        chmodSync(ackDir, ACK_DIR_PERMISSIONS);
+      }
       assert.ok(!unwritable.isError);
       assert.deepEqual(unwritable.content, writable.content, "the tool result is byte-identical when the ack write fails");
-      assert.ok(!existsSync(join(ackDir, "t9.json")));
-      chmodSync(ackDir, ACK_DIR_PERMISSIONS);
+      const tsAfter = (JSON.parse(readFileSync(markerPath, "utf8")) as { ts: number }).ts;
+      assert.equal(tsAfter, tsBefore, "the failed ack write left the existing marker untouched");
+      assert.deepEqual(readdirSync(ackDir).filter((name) => name.endsWith(".tmp")), [], "no temp file is left behind");
     } finally {
       await mcp.close();
       await server.close();

@@ -69,7 +69,7 @@ export function startServer(config: Config, client: HerdrCoreClient, audit: Audi
       accessTokenTtlSeconds: 3600,
       refreshTokenTtlSeconds: 30 * 24 * 60 * 60,
       scopes: ["mcp"],
-      allowedRedirectHosts: ["claude.ai", "chatgpt.com", "chat.openai.com", "openai.com"],
+      allowedRedirectHosts: ["claude.ai"],
     },
     mcpUrl,
     `${config.stateDir}/oauth.json`,

@@ -14,7 +14,8 @@ import { HerdrCoreLink } from "../src/core/link.js";
 import { startServer } from "../src/http/server.js";
 import { startFakeCore } from "./fake-core.js";
 
-const REDIRECT = "https://chatgpt.com/connector_platform_oauth_redirect";
+const REDIRECT = "https://claude.ai/connector_platform_oauth_redirect";
+const DISALLOWED_REDIRECT = "https://chatgpt.com/connector_platform_oauth_redirect";
 const PASSWORD = "test-password";
 
 function terminalFixture() {
@@ -95,6 +96,19 @@ test("OAuth 2.1 + Streamable HTTP serves tools end to end", async () => {
     });
     assert.equal(unauthenticated.status, 401);
     assert.match(unauthenticated.headers.get("www-authenticate") ?? "", /resource_metadata=/);
+
+    const disallowed = await fetch(`${base}/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        client_name: "ChatGPT",
+        redirect_uris: [DISALLOWED_REDIRECT],
+        token_endpoint_auth_method: "none",
+        grant_types: ["authorization_code", "refresh_token"],
+        response_types: ["code"],
+      }),
+    });
+    assert.equal(disallowed.status, 400);
 
     const registration = await fetch(`${base}/register`, {
       method: "POST",

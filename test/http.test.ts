@@ -62,15 +62,23 @@ test("OAuth 2.1 + Streamable HTTP serves tools end to end", async () => {
   const fakeHome = mkdtempSync(join(tmpdir(), "herdr-mcp-home-"));
   const realHome = process.env.HOME;
   const realAck = realHome ? join(realHome, ".config", "herdr-app", "data", "ack") : null;
-  const realAckBefore = realAck ? statSync(realAck) : null;
+  // throwIfNoEntry keeps this from throwing on a clean machine where the
+  // real ack dir has never been created.
+  const realAckBefore = realAck ? statSync(realAck, { throwIfNoEntry: false }) : null;
   process.env.HOME = fakeHome;
-  const core = await startFakeCore({
-    "terminal.list": () => ({ result: { terminals: [terminalFixture()], hidden_finished: 0, machines: [{ name: "build-box", state: "connected" }] } }),
-    "terminal.get": () => ({ result: terminalFixture() }),
-    "terminal.read": () => ({ result: { text: "$ claude\nAll tests pass\n", complete: true, how: "screen", why: null } }),
-    "terminal.send": () => ({ result: { turn: 4, started: true, status: "done", wait: null } }),
-    "machine.list": () => ({ result: { machines: [{ name: "build-box", state: "connected" }] } }),
-  });
+  let core;
+  try {
+    core = await startFakeCore({
+      "terminal.list": () => ({ result: { terminals: [terminalFixture()], hidden_finished: 0, machines: [{ name: "build-box", state: "connected" }] } }),
+      "terminal.get": () => ({ result: terminalFixture() }),
+      "terminal.read": () => ({ result: { text: "$ claude\nAll tests pass\n", complete: true, how: "screen", why: null } }),
+      "terminal.send": () => ({ result: { turn: 4, started: true, status: "done", wait: null } }),
+      "machine.list": () => ({ result: { machines: [{ name: "build-box", state: "connected" }] } }),
+    });
+  } catch (err) {
+    process.env.HOME = realHome;
+    throw err;
+  }
 
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
@@ -266,9 +274,13 @@ test("OAuth 2.1 + Streamable HTTP serves tools end to end", async () => {
     // The ack marker must land in the temp home, never the real one.
     const tempAck = join(fakeHome, ".config", "herdr-app", "data", "ack", "t7.json");
     assert.match(readFileSync(tempAck, "utf8"), /"tool":"read_terminal"/);
-    if (realAck && realAckBefore) {
-      const after = statSync(realAck);
-      assert.equal(after.mtimeMs, realAckBefore.mtimeMs, "real data/ack must not be touched");
+    if (realAck) {
+      const after = statSync(realAck, { throwIfNoEntry: false });
+      if (realAckBefore) {
+        assert.equal(after.mtimeMs, realAckBefore.mtimeMs, "real data/ack must not be touched");
+      } else {
+        assert.equal(after, undefined, "real data/ack must still not exist");
+      }
     }
 
     const send = await fetch(`${base}/mcp`, {

@@ -19,6 +19,10 @@ test("appendRenameMarker only touches the first line", () => {
   assert.equal(appendRenameMarker("/rename foo\nbar"), "/rename foo\u200b\nbar");
 });
 
+test("appendRenameMarker puts the marker before a trailing carriage return", () => {
+  assert.equal(appendRenameMarker("/rename foo\r\nbar"), "/rename foo\u200b\r\nbar");
+});
+
 test("appendRenameMarker passes other messages through", () => {
   assert.equal(appendRenameMarker("hello"), "hello");
 });

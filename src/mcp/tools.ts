@@ -33,9 +33,10 @@ const RENAME_MARKERS = new Set(["\u200b", "\u200c", "\u200d", "\u2060"]);
 export function appendRenameMarker(message: string): string {
   if (!/^\/rename\s/.test(message)) return message;
   const newline = message.indexOf("\n");
-  const firstLine = newline === -1 ? message : message.slice(0, newline);
-  if (RENAME_MARKERS.has(firstLine.slice(-1))) return message;
-  return `${firstLine}\u200b${message.slice(firstLine.length)}`;
+  const lineEnd = newline === -1 ? message.length : newline;
+  const titleEnd = message[lineEnd - 1] === "\r" ? lineEnd - 1 : lineEnd;
+  if (RENAME_MARKERS.has(message.slice(titleEnd - 1, titleEnd))) return message;
+  return `${message.slice(0, titleEnd)}\u200b${message.slice(titleEnd)}`;
 }
 
 export interface ToolContext {

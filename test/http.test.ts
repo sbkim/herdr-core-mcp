@@ -206,17 +206,21 @@ test("OAuth 2.1 + Streamable HTTP serves tools end to end", async () => {
     const listBody = (await list.json()) as { result: { tools: { name: string; annotations?: { readOnlyHint?: boolean } }[] } };
     const names = listBody.result.tools.map((tool) => tool.name).sort();
     assert.deepEqual(names, [
+      "close_session",
+      "create_session",
       "get_terminal",
       "interrupt_terminal",
+      "list_history",
       "list_machines",
       "list_terminals",
+      "read_history",
       "read_terminal",
       "send_keys",
       "send_message",
       "wait_terminal",
     ]);
     for (const tool of listBody.result.tools) {
-      const isWrite = ["send_message", "send_keys", "interrupt_terminal"].includes(tool.name);
+      const isWrite = ["send_message", "send_keys", "interrupt_terminal", "create_session", "close_session"].includes(tool.name);
       assert.equal(tool.annotations?.readOnlyHint, !isWrite, `${tool.name} readOnlyHint`);
     }
 

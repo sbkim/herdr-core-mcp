@@ -52,6 +52,7 @@ export function createMcpServer(client: HerdrCoreClient, audit: AuditLog, config
     audit,
     readOnly: config.readOnly,
     allowedMachines: config.allowedMachines,
+    stateDir: config.stateDir,
   });
   return server;
 }
@@ -68,7 +69,7 @@ export function startServer(config: Config, client: HerdrCoreClient, audit: Audi
       accessTokenTtlSeconds: 3600,
       refreshTokenTtlSeconds: 30 * 24 * 60 * 60,
       scopes: ["mcp"],
-      allowedRedirectHosts: ["chatgpt.com", "chat.openai.com", "openai.com"],
+      allowedRedirectHosts: ["claude.ai", "chatgpt.com", "chat.openai.com", "openai.com"],
     },
     mcpUrl,
     `${config.stateDir}/oauth.json`,

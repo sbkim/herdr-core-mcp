@@ -219,4 +219,33 @@ export class HerdrCoreClient {
       mutation: true,
     })) as InterruptResult;
   }
+
+  async runTerminal(params: {
+    argv: string[];
+    cwd: string;
+    name: string;
+    labels: Record<string, string>;
+    wait: boolean;
+    keep: boolean;
+    rm: boolean;
+    no_parent: boolean;
+    no_notify: boolean;
+  }): Promise<{ address: string; created_ms: number; labels?: Record<string, string> }> {
+    return (await this.link.call("terminal.run", params, { timeoutMs: 20_000, mutation: true })) as {
+      address: string;
+      created_ms: number;
+    };
+  }
+
+  async killTerminal(terminal: string): Promise<Terminal> {
+    return (await this.link.call("terminal.kill", { terminal }, { timeoutMs: 20_000, mutation: true })) as Terminal;
+  }
+
+  async rmTerminal(terminal: string): Promise<{ removed: string }> {
+    return (await this.link.call("terminal.rm", { terminal }, { timeoutMs: 20_000, mutation: true })) as { removed: string };
+  }
+
+  async getDocument(name: string): Promise<{ value: unknown; version: number }> {
+    return (await this.link.call("doc.get", { name })) as { value: unknown; version: number };
+  }
 }

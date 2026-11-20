@@ -2,6 +2,7 @@
 // three writing tools are audited and never bypass a blocked terminal.
 
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { readFileSync } from "node:fs";
 import { z } from "zod";
 
 import type { AuditLog } from "../audit.js";
@@ -16,6 +17,7 @@ import {
   type WaitResult,
   type HerdrCoreClient,
 } from "../core/client.js";
+import { registerCloseSessionTool, registerCreateSessionTool } from "./sessions.js";
 
 const MAX_READ_CHARS = 32_000;
 const MAX_LISTED_TERMINALS = 40;
@@ -28,6 +30,7 @@ export interface ToolContext {
   audit: AuditLog;
   readOnly: boolean;
   allowedMachines: string[] | null;
+  stateDir: string;
 }
 
 function truncateTail(text: string, limit: number): { text: string; truncated: boolean } {
@@ -98,6 +101,62 @@ function formatTerminalDetail(terminal: Terminal): string {
     lines.push(`finished: exit_code=${terminal.exit_code} signal=${terminal.signal} reason=${terminal.reason}`);
   }
   return lines.join("\n");
+}
+
+// ---- rename-history (voice queries over the terminal-numbers labels) ----
+
+const HISTORY_DIR = () => `${process.env.HOME ?? ""}/.config/herdr-app/data/rename-history`;
+const NUMBERS_JSON = () => `${process.env.HOME ?? ""}/.config/herdr-app/mods/terminal-numbers/numbers.json`;
+const MAX_HISTORY_LISTED = 60;
+const MAX_HISTORY_CHARS = 8_000;
+
+// Reports can quote real credentials; anything token-shaped is masked before
+// it leaves this process.
+const SECRETS = [
+  /\bsk-[A-Za-z0-9_-]{8,}/g,
+  /\bgh[pousr]_[A-Za-z0-9]{16,}/g,
+  /\bgithub_pat_[A-Za-z0-9_]{20,}/g,
+  /\bxox[baprs]-[A-Za-z0-9-]{10,}/g,
+  /\bAKIA[0-9A-Z]{16}\b/g,
+  /\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=-]{12,}/gi,
+  /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}/g,
+];
+
+function redact(value: string): string {
+  let out = value;
+  for (const pattern of SECRETS) out = out.replace(pattern, "[REDACTED]");
+  return out;
+}
+
+interface HistoryItem {
+  num: number;
+  title: string;
+  ts: number;
+  prompt?: string;
+  report?: string;
+}
+
+function readJsonFile(path: string): Record<string, unknown> | null {
+  try {
+    return JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+function addressForNumber(terminalNumber: number): { address: string; title?: string } | null {
+  const doc = readJsonFile(NUMBERS_JSON());
+  const numbers = (doc?.numbers ?? {}) as Record<string, string>;
+  const address = numbers[String(terminalNumber)];
+  if (!address) return null;
+  const terminals = (doc?.terminals ?? {}) as Record<string, { title?: string }>;
+  return { address, title: terminals[address]?.title };
+}
+
+function historyFor(address: string): HistoryItem[] {
+  const doc = readJsonFile(`${HISTORY_DIR()}/${encodeURIComponent(address)}.json`);
+  const items = (doc?.items ?? []) as HistoryItem[];
+  return Array.isArray(items) ? items.filter((it) => it && typeof it.num === "number" && typeof it.title === "string") : [];
 }
 
 function formatWait(result: WaitResult): string {
@@ -296,6 +355,9 @@ export function registerTools(server: McpServer, context: ToolContext): void {
 
   if (readOnly) return;
 
+  registerCreateSessionTool(server, { client, audit, stateDir: context.stateDir });
+  registerCloseSessionTool(server, { client, audit, stateDir: context.stateDir });
+
   server.registerTool(
     "send_message",
     {
@@ -401,6 +463,80 @@ export function registerTools(server: McpServer, context: ToolContext): void {
         return text(`已发送 ${result.key}：outcome=${result.outcome}。`);
       } catch (error) {
         audit.write({ tool: "interrupt_terminal", terminal, summary: "interrupt", outcome: "error", detail: describeError(error) });
+        return failure(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "list_history",
+    {
+      title: "List a terminal's rename history",
+      description:
+        "List the recorded /rename history of one terminal, oldest first, each with its stable history number, " +
+        "title, time and whether the report text was stored. Read from the rename-history store; nothing is sent to the terminal. " +
+        "Use terminal numbers from the terminal-numbers mod (the herdr.num labels).",
+      inputSchema: {
+        terminal_number: z.number().int().min(1).describe("Terminal number (herdr.num), for example 4."),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ terminal_number }) => {
+      try {
+        const found = addressForNumber(terminal_number);
+        if (!found) throw new Error(`没有编号为 ${terminal_number} 的终端（terminal-numbers 未分配此编号）。先用 list_terminals 查看。`);
+        const items = historyFor(found.address);
+        if (items.length === 0) {
+          return text(`终端 ${terminal_number}（${found.address}）还没有已记录的 /rename 历史。`);
+        }
+        const shown = items.slice(0, MAX_HISTORY_LISTED);
+        const lines = shown.map((item) => {
+          const when = new Date(item.ts).toLocaleString("sv-SE", { hour12: false });
+          const state = item.report ? "report" : item.prompt ? "prompt-only" : "title-only";
+          return `- #${item.num}  ${when}  "${redact(item.title)}"  ${state}`;
+        });
+        const omitted = items.length - shown.length;
+        const footer = omitted > 0 ? `\n…还有 ${omitted} 条更早的记录未显示。` : "";
+        return text(`terminal ${terminal_number} = ${found.address}${found.title ? ` （${found.title}）` : ""}\n${items.length} 条记录（旧→新）：\n${lines.join("\n")}${footer}`);
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "read_history",
+    {
+      title: "Read one rename-history entry",
+      description:
+        "Read one recorded history entry of a terminal by its stable history number: the title, the prompt and the full " +
+        "report text as captured when the turn ended — readable even after the terminal's scrollback is gone. " +
+ "Token-shaped strings are masked as [REDACTED]. Nothing is sent to the terminal.",
+      inputSchema: {
+        terminal_number: z.number().int().min(1).describe("Terminal number (herdr.num), for example 4."),
+        history_number: z.number().int().min(1).describe("History number from list_history, for example 2."),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ terminal_number, history_number }) => {
+      try {
+        const found = addressForNumber(terminal_number);
+        if (!found) throw new Error(`没有编号为 ${terminal_number} 的终端（terminal-numbers 未分配此编号）。先用 list_terminals 查看。`);
+        const items = historyFor(found.address);
+        const item = items.find((entry) => entry.num === history_number);
+        if (!item) {
+          throw new Error(`终端 ${terminal_number}（${found.address}）的历史里没有第 ${history_number} 条记录。先用 list_history 查看编号。`);
+        }
+        const when = new Date(item.ts).toLocaleString("sv-SE", { hour12: false });
+        const prompt = redact(item.prompt?.trim() ?? "（未保存）");
+        const report = redact(item.report?.trim() ?? "（未保存：那一轮没有留下报告文本）");
+        return text(
+          truncateTail(
+            `terminal ${terminal_number}（${found.address}）历史 #${history_number}\n标题：${redact(item.title)}\n时间：${when}\n\n提示词：\n${prompt}\n\n报告：\n${report}`,
+            MAX_HISTORY_CHARS * 4,
+          ).text,
+        );
+      } catch (error) {
         return failure(error);
       }
     },

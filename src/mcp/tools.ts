@@ -367,6 +367,80 @@ export function registerTools(server: McpServer, context: ToolContext): void {
     },
   );
 
+  server.registerTool(
+    "list_history",
+    {
+      title: "List a terminal's rename history",
+      description:
+        "List the recorded /rename history of one terminal, oldest first, each with its stable history number, " +
+        "title, time and whether the report text was stored. Read from the rename-history store; nothing is sent to the terminal. " +
+        "Use terminal numbers from the terminal-numbers mod (the herdr.num labels).",
+      inputSchema: {
+        terminal_number: z.number().int().min(1).describe("Terminal number (herdr.num), for example 4."),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ terminal_number }) => {
+      try {
+        const found = addressForNumber(terminal_number);
+        if (!found) throw new Error(`没有编号为 ${terminal_number} 的终端（terminal-numbers 未分配此编号）。先用 list_terminals 查看。`);
+        const items = historyFor(found.address);
+        if (items.length === 0) {
+          return text(`终端 ${terminal_number}（${found.address}）还没有已记录的 /rename 历史。`);
+        }
+        const shown = items.slice(0, MAX_HISTORY_LISTED);
+        const lines = shown.map((item) => {
+          const when = new Date(item.ts).toLocaleString("sv-SE", { hour12: false });
+          const state = item.report ? "report" : item.prompt ? "prompt-only" : "title-only";
+          return `- #${item.num}  ${when}  "${redact(item.title)}"  ${state}`;
+        });
+        const omitted = items.length - shown.length;
+        const footer = omitted > 0 ? `\n…还有 ${omitted} 条更早的记录未显示。` : "";
+        return text(`terminal ${terminal_number} = ${found.address}${found.title ? ` （${found.title}）` : ""}\n${items.length} 条记录（旧→新）：\n${lines.join("\n")}${footer}`);
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  );
+
+  server.registerTool(
+    "read_history",
+    {
+      title: "Read one rename-history entry",
+      description:
+        "Read one recorded history entry of a terminal by its stable history number: the title, the prompt and the full " +
+        "report text as captured when the turn ended — readable even after the terminal's scrollback is gone. " +
+ "Token-shaped strings are masked as [REDACTED]. Nothing is sent to the terminal.",
+      inputSchema: {
+        terminal_number: z.number().int().min(1).describe("Terminal number (herdr.num), for example 4."),
+        history_number: z.number().int().min(1).describe("History number from list_history, for example 2."),
+      },
+      annotations: { readOnlyHint: true, openWorldHint: false },
+    },
+    async ({ terminal_number, history_number }) => {
+      try {
+        const found = addressForNumber(terminal_number);
+        if (!found) throw new Error(`没有编号为 ${terminal_number} 的终端（terminal-numbers 未分配此编号）。先用 list_terminals 查看。`);
+        const items = historyFor(found.address);
+        const item = items.find((entry) => entry.num === history_number);
+        if (!item) {
+          throw new Error(`终端 ${terminal_number}（${found.address}）的历史里没有第 ${history_number} 条记录。先用 list_history 查看编号。`);
+        }
+        const when = new Date(item.ts).toLocaleString("sv-SE", { hour12: false });
+        const prompt = redact(item.prompt?.trim() ?? "（未保存）");
+        const report = redact(item.report?.trim() ?? "（未保存：那一轮没有留下报告文本）");
+        return text(
+          truncateTail(
+            `terminal ${terminal_number}（${found.address}）历史 #${history_number}\n标题：${redact(item.title)}\n时间：${when}\n\n提示词：\n${prompt}\n\n报告：\n${report}`,
+            MAX_HISTORY_CHARS * 4,
+          ).text,
+        );
+      } catch (error) {
+        return failure(error);
+      }
+    },
+  );
+
   if (readOnly) return;
 
   registerCreateSessionTool(server, { client, audit, stateDir: context.stateDir });
@@ -477,80 +551,6 @@ export function registerTools(server: McpServer, context: ToolContext): void {
         return text(`已发送 ${result.key}：outcome=${result.outcome}。`);
       } catch (error) {
         audit.write({ tool: "interrupt_terminal", terminal, summary: "interrupt", outcome: "error", detail: describeError(error) });
-        return failure(error);
-      }
-    },
-  );
-
-  server.registerTool(
-    "list_history",
-    {
-      title: "List a terminal's rename history",
-      description:
-        "List the recorded /rename history of one terminal, oldest first, each with its stable history number, " +
-        "title, time and whether the report text was stored. Read from the rename-history store; nothing is sent to the terminal. " +
-        "Use terminal numbers from the terminal-numbers mod (the herdr.num labels).",
-      inputSchema: {
-        terminal_number: z.number().int().min(1).describe("Terminal number (herdr.num), for example 4."),
-      },
-      annotations: { readOnlyHint: true, openWorldHint: false },
-    },
-    async ({ terminal_number }) => {
-      try {
-        const found = addressForNumber(terminal_number);
-        if (!found) throw new Error(`没有编号为 ${terminal_number} 的终端（terminal-numbers 未分配此编号）。先用 list_terminals 查看。`);
-        const items = historyFor(found.address);
-        if (items.length === 0) {
-          return text(`终端 ${terminal_number}（${found.address}）还没有已记录的 /rename 历史。`);
-        }
-        const shown = items.slice(0, MAX_HISTORY_LISTED);
-        const lines = shown.map((item) => {
-          const when = new Date(item.ts).toLocaleString("sv-SE", { hour12: false });
-          const state = item.report ? "report" : item.prompt ? "prompt-only" : "title-only";
-          return `- #${item.num}  ${when}  "${redact(item.title)}"  ${state}`;
-        });
-        const omitted = items.length - shown.length;
-        const footer = omitted > 0 ? `\n…还有 ${omitted} 条更早的记录未显示。` : "";
-        return text(`terminal ${terminal_number} = ${found.address}${found.title ? ` （${found.title}）` : ""}\n${items.length} 条记录（旧→新）：\n${lines.join("\n")}${footer}`);
-      } catch (error) {
-        return failure(error);
-      }
-    },
-  );
-
-  server.registerTool(
-    "read_history",
-    {
-      title: "Read one rename-history entry",
-      description:
-        "Read one recorded history entry of a terminal by its stable history number: the title, the prompt and the full " +
-        "report text as captured when the turn ended — readable even after the terminal's scrollback is gone. " +
- "Token-shaped strings are masked as [REDACTED]. Nothing is sent to the terminal.",
-      inputSchema: {
-        terminal_number: z.number().int().min(1).describe("Terminal number (herdr.num), for example 4."),
-        history_number: z.number().int().min(1).describe("History number from list_history, for example 2."),
-      },
-      annotations: { readOnlyHint: true, openWorldHint: false },
-    },
-    async ({ terminal_number, history_number }) => {
-      try {
-        const found = addressForNumber(terminal_number);
-        if (!found) throw new Error(`没有编号为 ${terminal_number} 的终端（terminal-numbers 未分配此编号）。先用 list_terminals 查看。`);
-        const items = historyFor(found.address);
-        const item = items.find((entry) => entry.num === history_number);
-        if (!item) {
-          throw new Error(`终端 ${terminal_number}（${found.address}）的历史里没有第 ${history_number} 条记录。先用 list_history 查看编号。`);
-        }
-        const when = new Date(item.ts).toLocaleString("sv-SE", { hour12: false });
-        const prompt = redact(item.prompt?.trim() ?? "（未保存）");
-        const report = redact(item.report?.trim() ?? "（未保存：那一轮没有留下报告文本）");
-        return text(
-          truncateTail(
-            `terminal ${terminal_number}（${found.address}）历史 #${history_number}\n标题：${redact(item.title)}\n时间：${when}\n\n提示词：\n${prompt}\n\n报告：\n${report}`,
-            MAX_HISTORY_CHARS * 4,
-          ).text,
-        );
-      } catch (error) {
         return failure(error);
       }
     },

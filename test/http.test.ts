@@ -274,3 +274,137 @@ test("OAuth 2.1 + Streamable HTTP serves tools end to end", async () => {
     rmSync(stateDir, { recursive: true, force: true });
   }
 });
+
+test("read-only mode serves the seven read tools including the history tools", async () => {
+  const stateDir = mkdtempSync(join(tmpdir(), "herdr-mcp-readonly-"));
+  const core = await startFakeCore({
+    "terminal.list": () => ({ result: { terminals: [terminalFixture()], hidden_finished: 0, machines: [] } }),
+    "terminal.get": () => ({ result: terminalFixture() }),
+    "terminal.read": () => ({ result: { text: "$ claude\nAll tests pass\n", complete: true, how: "screen", why: null } }),
+    "terminal.send": () => ({ result: { turn: 4, started: true, status: "done", wait: null } }),
+    "machine.list": () => ({ result: { machines: [] } }),
+  });
+
+  const port = await freePort();
+  const base = `http://127.0.0.1:${port}`;
+  const config: Config = {
+    host: "127.0.0.1",
+    port,
+    publicBaseUrl: new URL(base),
+    allowedHosts: ["127.0.0.1", "localhost"],
+    stateDir,
+    session: "default",
+    ownerPassword: PASSWORD,
+    readOnly: true,
+    allowedMachines: null,
+    authFile: join(stateDir, "auth.json"),
+    auditFile: join(stateDir, "audit.log"),
+    logRequests: false,
+  };
+  const link = new HerdrCoreLink({ path: core.path, source: "env" }, "default");
+  const client = new HerdrCoreClient(link);
+  const audit = new AuditLog(config.auditFile);
+  const running = await startServer(config, client, audit);
+
+  try {
+    const registration = await fetch(`${base}/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        client_name: "ChatGPT",
+        redirect_uris: [REDIRECT],
+        token_endpoint_auth_method: "none",
+        grant_types: ["authorization_code", "refresh_token"],
+        response_types: ["code"],
+      }),
+    });
+    assert.equal(registration.status, 201);
+    const clientInfo = (await registration.json()) as { client_id: string };
+
+    const verifier = randomBytes(32).toString("base64url");
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const authorizeQuery = new URLSearchParams({
+      response_type: "code",
+      client_id: clientInfo.client_id,
+      redirect_uri: REDIRECT,
+      code_challenge: challenge,
+      code_challenge_method: "S256",
+      scope: "mcp",
+      resource: `${base}/mcp`,
+      state: "state-1",
+    });
+    const approved = await fetch(`${base}/authorize?${authorizeQuery}`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ ...Object.fromEntries(authorizeQuery), owner_password: PASSWORD }),
+      redirect: "manual",
+    });
+    assert.equal(approved.status, 302);
+    const code = new URL(approved.headers.get("location") ?? "").searchParams.get("code");
+    assert.ok(code);
+
+    const tokenResponse = await fetch(`${base}/token`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "authorization_code",
+        code: code!,
+        redirect_uri: REDIRECT,
+        code_verifier: verifier,
+        client_id: clientInfo.client_id,
+        resource: `${base}/mcp`,
+      }),
+    });
+    assert.equal(tokenResponse.status, 200);
+    const tokens = (await tokenResponse.json()) as { access_token: string };
+
+    const authHeaders = {
+      authorization: `Bearer ${tokens.access_token}`,
+      "content-type": "application/json",
+      accept: "application/json, text/event-stream",
+      "mcp-protocol-version": "2025-06-18",
+    };
+    const initialize = await fetch(`${base}/mcp`, {
+      method: "POST",
+      headers: authHeaders,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "smoke", version: "0" } },
+      }),
+    });
+    assert.equal(initialize.status, 200);
+    const sessionId = initialize.headers.get("mcp-session-id");
+    assert.ok(sessionId);
+    const sessionHeaders = { ...authHeaders, "mcp-session-id": sessionId! };
+    await fetch(`${base}/mcp`, {
+      method: "POST",
+      headers: sessionHeaders,
+      body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+    });
+
+    const list = await fetch(`${base}/mcp`, {
+      method: "POST",
+      headers: sessionHeaders,
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }),
+    });
+    assert.equal(list.status, 200);
+    const listBody = (await list.json()) as { result: { tools: { name: string }[] } };
+    const names = listBody.result.tools.map((tool) => tool.name).sort();
+    assert.deepEqual(names, [
+      "get_terminal",
+      "list_history",
+      "list_machines",
+      "list_terminals",
+      "read_history",
+      "read_terminal",
+      "wait_terminal",
+    ]);
+  } finally {
+    await running.close();
+    link.close();
+    await core.close();
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});

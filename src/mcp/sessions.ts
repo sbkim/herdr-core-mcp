@@ -93,11 +93,12 @@ export function registerCloseSessionTool(
         const record = await client.getTerminal(address);
         const profile = record.labels?.oauth_mcp_profile;
         const project = record.labels?.oauth_mcp_project;
+        const config = profile !== undefined && Object.hasOwn(profiles, profile) ? profiles[profile] : undefined;
         const allowed =
-          profile !== undefined &&
+          config !== undefined &&
           project !== undefined &&
-          profiles[profile] !== undefined &&
-          profiles[profile].projects[project] !== undefined;
+          Object.hasOwn(config.projects, project) &&
+          typeof config.projects[project] === "string";
         if (!allowed) {
           throw new Error(
             `Refused: ${record.address} was not started by create_session with a currently configured profile/project.`,
@@ -190,10 +191,10 @@ export function registerCreateSessionTool(
     async ({ profile, project, variant, name, request_id }) => {
       try {
         const profiles = loadProfiles(stateDir);
-        const config = profiles[profile];
+        const config = Object.hasOwn(profiles, profile) ? profiles[profile] : undefined;
         if (config === undefined) throw new Error(`Unknown profile '${profile}': operator-configured profiles only.`);
-        const cwd = config.projects[project];
-        if (cwd === undefined) throw new Error(`Unknown project '${project}' for profile '${profile}'.`);
+        const cwd = Object.hasOwn(config.projects, project) ? config.projects[project] : undefined;
+        if (typeof cwd !== "string") throw new Error(`Unknown project '${project}' for profile '${profile}'.`);
         const variantArgs = variant === undefined ? [] : config.variants?.[variant];
         if (variant !== undefined && variantArgs === undefined) throw new Error(`Unknown variant '${variant}'.`);
         const argv = [config.executable, ...(config.args ?? []), ...(variantArgs ?? [])];
